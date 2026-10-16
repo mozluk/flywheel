@@ -113,6 +113,16 @@ contract AdConversion is CampaignHooks {
     /// @notice Mapping from campaign to number of conversion configs
     mapping(address campaign => uint16) public conversionConfigCount;
 
+    /// @notice Mapping recording which conversion event IDs have already been processed for a campaign.
+    ///
+    /// @dev `Conversion.eventId` is documented as the unique identifier of a conversion event, but nothing
+    ///      previously enforced that uniqueness on-chain. Without this record, the attribution provider can
+    ///      submit the same conversion more than once (for example when a batch is retried after a partial
+    ///      off-chain failure, or when two submitted batches share an event ID) and pay the publisher twice
+    ///      from the same campaign funds. Storing processed event IDs makes conversion processing idempotent
+    ///      and enforces the documented uniqueness invariant.
+    mapping(address campaign => mapping(bytes16 eventId => bool processed)) public isConversionProcessed;
+
     /// @notice Mapping of campaign addresses to their URI prefix
     mapping(address campaign => string uri) public override campaignURI;
 
@@ -197,6 +207,9 @@ contract AdConversion is CampaignHooks {
 
     /// @notice Error thrown when conversion type doesn't match config
     error InvalidConversionType();
+
+    /// @notice Thrown when an attribution batch re-uses an event ID already recorded for the campaign.
+    error DuplicateConversionEvent(bytes16 eventId);
 
     /// @notice Error thrown when trying to add too many conversion configs
     error TooManyConversionConfigs();
@@ -378,6 +391,7 @@ contract AdConversion is CampaignHooks {
         }
 
         // Store conversion configs
+        if (configs.length > type(uint16).max) revert TooManyConversionConfigs();
         conversionConfigCount[campaign] = uint16(configs.length);
         uint256 count = configs.length;
         for (uint16 i = 0; i < count; i++) {
@@ -434,6 +448,15 @@ contract AdConversion is CampaignHooks {
             // Validate conversion config (if configId is not 0)
             uint16 configId = attributions[i].conversion.configId;
             bytes memory logBytes = attributions[i].logBytes;
+
+            // Enforce that a documented unique conversion event is never processed twice
+            bytes16 eventId = attributions[i].conversion.eventId;
+            if (eventId != bytes16(0)) {
+                if (isConversionProcessed[campaign][eventId]) {
+                    revert DuplicateConversionEvent(eventId);
+                }
+                isConversionProcessed[campaign][eventId] = true;
+            }
 
             // Validating that the config exists
             if (configId != 0) {
